@@ -190,9 +190,15 @@ function getHudOverlayDisplay() {
 
 function getHudOverlayBounds() {
 	const { workArea } = getHudOverlayDisplay();
+	// On platforms that support mouse passthrough the overlay always spans the
+	// full work area — including while recording. Only the HUD bar itself
+	// captures the cursor (via hover detection), so the rest of the screen the
+	// user is recording stays clickable. Shrinking to the opaque bottom-centred
+	// fallback during recording used to permanently block the bottom strip of
+	// the screen (dock, taskbars, bottom UI), which is the HUD-blocking bug.
 	return getHudOverlayWindowBounds(
 		workArea,
-		isHudOverlayMousePassthroughSupported() && !hudOverlayRecordingActive,
+		isHudOverlayMousePassthroughSupported(),
 		hudOverlayFallbackExpanded,
 	);
 }
@@ -277,10 +283,17 @@ function setHudOverlayFallbackExpanded(expanded: boolean) {
 }
 
 function setHudOverlayMousePassthrough(ignore: boolean) {
+	const passthroughSupported = isHudOverlayMousePassthroughSupported();
+	// While recording on platforms WITHOUT passthrough (Win10/Linux) the overlay
+	// is the opaque compact HUD, so it must stay fully interactive. With
+	// passthrough (macOS/Win11) the overlay spans the whole screen, so it must
+	// keep toggling pass-through on hover — otherwise it would block clicks on
+	// whatever is being recorded.
+	const forceInteractiveForRecording = hudOverlayRecordingActive && !passthroughSupported;
 	hudOverlayIgnoringMouse =
 		hudOverlaySourceSelectionActive && !hudOverlayRecordingActive
 			? true
-			: hudOverlayRecordingActive
+			: forceInteractiveForRecording
 				? false
 				: ignore;
 
@@ -293,14 +306,14 @@ function setHudOverlayMousePassthrough(ignore: boolean) {
 		return;
 	}
 
-	if (hudOverlayRecordingActive) {
+	if (forceInteractiveForRecording) {
 		hudOverlayFallbackExpanded = false;
 		applyHudOverlayBounds();
 		hudOverlayWindow.setIgnoreMouseEvents(false);
 		return;
 	}
 
-	if (!isHudOverlayMousePassthroughSupported()) {
+	if (!passthroughSupported) {
 		if (process.platform !== "linux") {
 			setHudOverlayFallbackExpanded(!ignore);
 		}
@@ -480,13 +493,11 @@ export function createHudOverlayWindow(): BrowserWindow {
 	}
 
 	if (isHudOverlayMousePassthroughSupported()) {
-		if (hudOverlayRecordingActive) {
-			hudOverlayIgnoringMouse = false;
-			win.setIgnoreMouseEvents(false);
-		} else {
-			hudOverlayIgnoringMouse = true;
-			win.setIgnoreMouseEvents(true, { forward: true });
-		}
+		// Always start click-through (even mid-recording): the full-screen
+		// overlay must never capture the entire screen. Hover detection
+		// re-enables the HUD bar when the cursor is over it.
+		hudOverlayIgnoringMouse = true;
+		win.setIgnoreMouseEvents(true, { forward: true });
 	}
 
 	// On Windows 11+, focus changes (e.g. showing a native notification) can break
@@ -615,13 +626,11 @@ export function reassertHudOverlayMousePassthrough(): void {
 		return;
 	}
 
-	if (hudOverlayRecordingActive) {
-		hud.setIgnoreMouseEvents(false);
-		return;
-	}
-
 	// Toggle off then back on so the native WS_EX_TRANSPARENT flag is fully
 	// re-initialised rather than merely re-asserted in a potentially broken state.
+	// This applies during recording too: on Win11 the overlay is full-screen and
+	// must stay pass-through, otherwise re-asserting it interactive would block
+	// clicks on the recorded screen.
 	hud.setIgnoreMouseEvents(false);
 	if (hudOverlayMouseReassertTimer) {
 		clearTimeout(hudOverlayMouseReassertTimer);
@@ -638,7 +647,13 @@ export function setHudOverlayRecordingActive(recording: boolean): void {
 	hudOverlayRecordingActive = Boolean(recording);
 	hudOverlayFallbackExpanded = false;
 	applyHudOverlayBounds();
-	setHudOverlayMousePassthrough(!hudOverlayRecordingActive);
+	// Start the overlay in pass-through mode (ignore=true). On passthrough
+	// platforms this keeps the full-screen overlay click-through so it never
+	// blocks the recorded screen; hover detection re-enables the HUD bar when
+	// the cursor is over it. On non-passthrough platforms the recording branch
+	// inside setHudOverlayMousePassthrough forces the compact HUD interactive
+	// regardless of this argument.
+	setHudOverlayMousePassthrough(true);
 }
 
 export function createUpdateToastWindow(): BrowserWindow {
